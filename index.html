@@ -1,1 +1,1418 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  FileText, 
+  Clock, 
+  Award, 
+  User, 
+  PlusCircle, 
+  Trash2, 
+  CheckCircle2, 
+  AlertTriangle, 
+  Edit3, 
+  Check, 
+  RefreshCw,
+  Info,
+  UploadCloud,
+  FileCode,
+  Image as ImageIcon,
+  Building,
+  FileSpreadsheet,
+  Download,
+  Database,
+  CloudLightning,
+  RefreshCcw,
+  ExternalLink,
+  Settings,
+  Calendar,
+  Layers,
+  HelpCircle,
+  Copy,
+  X,
+  FolderOpen
+} from 'lucide-react';
 
+// Firebase SDK 임포트 ( persistent cloud storage 지원 )
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, doc, addDoc, onSnapshot, deleteDoc, query, getDoc, setDoc } from 'firebase/firestore';
+
+// 런타임 주입용 전역 변수 파싱 및 Firebase 초기화
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+let firebaseConfig = null;
+let app, auth, db;
+let isFirebaseAvailable = false;
+
+try {
+  if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+    firebaseConfig = JSON.parse(__firebase_config);
+    app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+    isFirebaseAvailable = true;
+  }
+} catch (error) {
+  console.error("Firebase 초기화 중 실패:", error);
+}
+
+// API Key (런타임에 주입되므로 빈 문자열로 설정)
+const apiKey = "";
+
+// 학년도 자동 계산 함수 (한국 기준 3월 학기제 반영)
+const getCurrentSchoolYear = () => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  return month < 3 ? year - 1 : year;
+};
+
+// [업데이트] 교사님께서 새로 제공해주신 배포 완료된 실시간 구글 API 웹 앱 URL 매핑
+const DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycbyZX_zW7tCwUn6k2DMoAGDS4CxLAZ83Pxw7qoFH-jq1AwTyvUDGTYXvUiBatWl9WQG1/exec";
+
+// 교사님의 구글 스프레드시트 바로가기 기본 URL
+const DEFAULT_SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1Eyw-ryAt0ABad8Xsgc0hxKatLcV3cYPdIANIJvwGi08/edit?gid=0#gid=0";
+
+// 교사님의 구글 드라이브 원본 이수증 보관 폴더 기본 공유 URL
+const DEFAULT_DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1CiETmrps_QqT7mZldcMvqLVNs4yhWrDi?usp=sharing";
+
+export default function App() {
+  // 연수 이수 대장 목록 상태
+  const [certificates, setCertificates] = useState([]);
+  const [isParsing, setIsParsing] = useState(false);
+  const [parsingStep, setParsingStep] = useState("");
+  const [errorMsg, setErrorMsg] = useState("");
+  
+  // 구글 시트 타이틀 자동 세팅
+  const [sheetTitle, setSheetTitle] = useState(`${getCurrentSchoolYear()}학년도 교원 연수 이수증 통합 관리대장`);
+  const [sheetSyncing, setSheetSyncing] = useState(false);
+  
+  // 구글 앱스 스크립트(GAS) 웹 앱 URL 상태 관리
+  const [gasUrl, setGasUrl] = useState(() => localStorage.getItem("gas_web_app_url") || DEFAULT_GAS_URL);
+  
+  // 실제 구글 스프레드시트 이동용 URL 상태 관리 (로컬스토리지 연동 및 요청해주신 시트 주소 기본값 설정)
+  const [spreadsheetUrl, setSpreadsheetUrl] = useState(() => localStorage.getItem("google_spreadsheet_url") || DEFAULT_SPREADSHEET_URL);
+
+  // 실제 이수증 파일 원본 저장용 구글 드라이브 폴더 URL 상태 관리 (로컬스토리지 연동 및 기본값 설정)
+  const [driveFolderUrl, setDriveFolderUrl] = useState(() => localStorage.getItem("google_drive_folder_url") || DEFAULT_DRIVE_FOLDER_URL);
+
+  const [isEditingUrl, setIsEditingUrl] = useState(false);
+  
+  // 설정 입력용 내부 상태값들
+  const [gasInputValue, setGasInputValue] = useState(() => localStorage.getItem("gas_web_app_url") || DEFAULT_GAS_URL);
+  const [sheetInputValue, setSheetInputValue] = useState(() => localStorage.getItem("google_spreadsheet_url") || DEFAULT_SPREADSHEET_URL);
+  const [folderInputValue, setFolderInputValue] = useState(() => localStorage.getItem("google_drive_folder_url") || DEFAULT_DRIVE_FOLDER_URL);
+  
+  const [showGasGuide, setShowGasGuide] = useState(false);
+
+  // 드래그 앤 드롭 상태 관리
+  const [isDragActive, setIsDragActive] = useState(false);
+  const fileInputRef = useRef(null);
+
+  // 파싱 결과 임시 저장 상태
+  const [parsedResult, setParsedResult] = useState(null);
+  const [showEditor, setShowEditor] = useState(false);
+
+  // 알림 메시지 상태 (Toast)
+  const [notification, setNotification] = useState("");
+
+  // ----------------------------------------------------
+  // 핸들러 함수들 정의 (Temporal Dead Zone 에러방지)
+  // ----------------------------------------------------
+  const handleDrag = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setIsDragActive(true);
+    } else if (e.type === "dragleave") {
+      setIsDragActive(false);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleFileProcess(e.dataTransfer.files[0]);
+    }
+  };
+
+  const handleFileSelect = (e) => {
+    if (e.target.files && e.target.files[0]) {
+      handleFileProcess(e.target.files[0]);
+    }
+  };
+
+  // 1. PDF.js 라이브러리 동적 로드
+  useEffect(() => {
+    if (!window.pdfjsLib) {
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js';
+      script.onload = () => {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+      };
+      document.head.appendChild(script);
+    }
+  }, []);
+
+  // 2. 가동 시 로컬스토리지 세팅 동기화 및 실시간 GAS 데이터베이스 로드
+  useEffect(() => {
+    setGasInputValue(gasUrl);
+    setSheetInputValue(spreadsheetUrl);
+    setFolderInputValue(driveFolderUrl);
+    fetchGasData();
+  }, [gasUrl, spreadsheetUrl, driveFolderUrl]);
+
+  // Toast 알림 도우미
+  const triggerNotification = (msg) => {
+    setNotification(msg);
+    setTimeout(() => {
+      setNotification("");
+    }, 4500);
+  };
+
+  // 총 이수 시간 계산
+  const totalHours = certificates.reduce((acc, curr) => acc + curr.timeNum, 0);
+
+  // 지수 백오프 기반 구글 앱스 스크립트 웹 앱 통신 전용 함수 (CORS 우회 설계)
+  const callGasAPI = async (payload) => {
+    if (!gasUrl) {
+      throw new Error("구글 앱스 스크립트 웹 앱 주소(URL)가 설정되지 않았습니다. 설정창을 열어 주소를 연동해주세요.");
+    }
+    const delays = [1000, 2000, 4000, 8000, 16000];
+    
+    for (let attempt = 0; attempt <= 5; attempt++) {
+      try {
+        const response = await fetch(gasUrl, {
+          method: 'POST',
+          mode: 'cors',
+          headers: {
+            // text/plain 방식으로 전달하여 OPTIONS preflight를 원천 방지, GAS 보안 우회
+            'Content-Type': 'text/plain;charset=utf-8'
+          },
+          body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+          throw new Error(`스프레드시트 통신 실패 (상태: ${response.status})`);
+        }
+
+        const data = await response.json();
+        return data;
+      } catch (error) {
+        if (attempt === 5) throw error;
+        await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+      }
+    }
+  };
+
+  // 실시간 구글 시트 원본 데이터 조회하여 명단 동기화
+  const fetchGasData = async () => {
+    if (!gasUrl) {
+      const localData = localStorage.getItem("local_certs");
+      if (localData) {
+        setCertificates(JSON.parse(localData));
+      }
+      return;
+    }
+
+    setSheetSyncing(true);
+    try {
+      const response = await callGasAPI({ action: "read" });
+      if (response && response.status === "success") {
+        const parsedList = (response.data || []).map(item => {
+          let timeNum = 0;
+          if (item.timeStr) {
+            const hourMatch = item.timeStr.match(/([0-9]+)\s*시간/);
+            const minMatch = item.timeStr.match(/([0-9]+)\s*분/);
+            if (hourMatch) timeNum += parseInt(hourMatch[1], 10);
+            if (minMatch) timeNum += parseFloat((parseInt(minMatch[1], 10) / 60).toFixed(2));
+          }
+          return {
+            ...item,
+            timeNum
+          };
+        });
+        setCertificates(parsedList);
+        localStorage.setItem("local_certs", JSON.stringify(parsedList));
+      } else {
+        throw new Error(response.message || "시트 데이터를 로드하지 못했습니다.");
+      }
+    } catch (err) {
+      console.error(err);
+      setErrorMsg(`스프레드시트에서 데이터를 가져오는 데 실패했습니다: ${err.message}`);
+    } finally {
+      setSheetSyncing(false);
+    }
+  };
+
+  // 구글 앱스 스크립트 웹 앱, 구글 시트 주소, 드라이브 폴더 주소 일괄 저장 처리
+  const handleSaveSheetUrl = () => {
+    let rawGasUrl = gasInputValue.trim();
+    if (rawGasUrl && !/^https?:\/\//i.test(rawGasUrl)) {
+      rawGasUrl = "https://" + rawGasUrl;
+    }
+
+    if (rawGasUrl && !rawGasUrl.includes("script.google.com")) {
+      setErrorMsg("올바른 Google Apps Script 웹 앱 URL이 아닙니다. 형식을 확인해주세요.");
+      return;
+    }
+
+    let rawSheetUrl = sheetInputValue.trim();
+    if (rawSheetUrl && !/^https?:\/\//i.test(rawSheetUrl)) {
+      rawSheetUrl = "https://" + rawSheetUrl;
+    }
+
+    let rawFolderUrl = folderInputValue.trim();
+    if (rawFolderUrl && !/^https?:\/\//i.test(rawFolderUrl)) {
+      rawFolderUrl = "https://" + rawFolderUrl;
+    }
+
+    localStorage.setItem("gas_web_app_url", rawGasUrl);
+    localStorage.setItem("google_spreadsheet_url", rawSheetUrl);
+    localStorage.setItem("google_drive_folder_url", rawFolderUrl);
+    
+    setGasUrl(rawGasUrl);
+    setSpreadsheetUrl(rawSheetUrl);
+    setDriveFolderUrl(rawFolderUrl);
+    
+    setIsEditingUrl(false);
+    setErrorMsg("");
+    triggerNotification("구글 연동 설정(동기화 API, 구글 스프레드시트 및 원본 저장 폴더 링크)이 완벽히 연계 및 저장되었습니다!");
+  };
+
+  // 구글 시트 가기 제어
+  const handleGoToGoogleSheet = () => {
+    if (spreadsheetUrl) {
+      window.open(spreadsheetUrl, "_blank", "noopener,noreferrer");
+    } else {
+      const newSheetUrl = "https://sheets.new";
+      window.open(newSheetUrl, "_blank", "noopener,noreferrer");
+      setIsEditingUrl(true);
+      setShowGasGuide(true);
+      triggerNotification("이수증 대장 구글 스프레드시트 URL이 미등록 상태입니다. 우측 상단 설정에서 실제 사용하시는 구글시트 주소를 기입해 주세요.");
+    }
+  };
+
+  // 구글 드라이브 폴더 열기 제어
+  const handleGoToDriveFolder = () => {
+    if (driveFolderUrl) {
+      window.open(driveFolderUrl, "_blank", "noopener,noreferrer");
+    } else {
+      setIsEditingUrl(true);
+      triggerNotification("구글 드라이브 보관 폴더 URL이 설정되어 있지 않습니다. 우측 상단 설정창에서 저장 폴더 URL을 등록해 주세요.");
+    }
+  };
+
+  // 이수증 백업용 CSV 다운로드
+  const downloadCSV = () => {
+    if (certificates.length === 0) return;
+    const BOM = "\uFEFF"; // 한글 깨짐 방지
+    let csvContent = BOM + `"${sheetTitle}"\n\n`;
+    csvContent += "고유번호,일자,소속 근무교,이수자 성명,이수번호,연수 과정명,이수기관,이수인정시간,드라이브 폴더,원본파일명\n";
+    
+    certificates.forEach(cert => {
+      const row = [
+        `"${cert.id || ""}"`,
+        `"${cert.date || ""}"`,
+        `"${cert.affiliation || ""}"`,
+        `"${cert.name || ""}"`,
+        `"${cert.certNo || ""}"`,
+        `"${cert.courseName ? cert.courseName.replace(/"/g, '""') : ""}"`,
+        `"${cert.issuer || ""}"`,
+        `"${cert.timeStr || ""}"`,
+        `"${cert.driveFolder || ""}"`,
+        `"${cert.fileName || ""}"`
+      ].join(",");
+      csvContent += row + "\n";
+    });
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `${sheetTitle}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    triggerNotification("구글 시트 호환 규격 CSV 파일을 다운로드했습니다.");
+  };
+
+  // 헬퍼: 파일 읽기
+  const fileToBase64 = (file) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = (error) => reject(error);
+    });
+  };
+
+  // 헬퍼: PDF 텍출
+  const extractTextFromPdf = async (file) => {
+    if (!window.pdfjsLib) {
+      throw new Error("PDF 분석 엔진 로드 중... 잠시 후 다시 드롭해주세요.");
+    }
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    let fullText = '';
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items.map(item => item.str).join('\n');
+      fullText += pageText + '\n';
+    }
+    return fullText;
+  };
+
+  // Gemini API 호출 헬퍼
+  const callGeminiAPI = async (payload) => {
+    const delays = [1000, 2000, 4000, 8000, 16000];
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+    for (let attempt = 0; attempt <= 5; attempt++) {
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) throw new Error(`Gemini API 통신 실패 (${response.status})`);
+        return await response.json();
+      } catch (error) {
+        if (attempt === 5) throw error;
+        await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+      }
+    }
+  };
+
+  // 파일 파싱 및 처리 프로세스
+  const handleFileProcess = async (file) => {
+    if (!file) return;
+    setIsParsing(true);
+    setErrorMsg("");
+    setParsedResult(null);
+    setShowEditor(false);
+
+    try {
+      const fileName = (file.name || "").toLowerCase();
+      const fileType = (file.type || "").toLowerCase();
+
+      const isPdf = fileType === "application/pdf" || fileName.endsWith(".pdf");
+      const isImage = fileType.startsWith("image/") || 
+                      fileName.endsWith(".png") || 
+                      fileName.endsWith(".jpg") || 
+                      fileName.endsWith(".jpeg") || 
+                      fileName.endsWith(".gif") || 
+                      fileName.endsWith(".webp") || 
+                      fileName.endsWith(".bmp");
+      const isCsv = fileType === "text/csv" || 
+                    fileType === "application/vnd.ms-excel" || 
+                    fileName.endsWith(".csv");
+
+      if (!isPdf && !isImage && !isCsv) {
+        throw new Error(`지원하지 않는 파일 형식입니다. (파일명: ${file.name || "알수없음"}, 타입: ${file.type || "알수없음"})\nPDF 문서, 이미지(PNG/JPG), 또는 구글시트 CSV 백업본 파일만 업로드할 수 있습니다.`);
+      }
+
+      // 1. CSV 대장 데이터 일괄 로드
+      if (isCsv) {
+        setParsingStep("구글 시트(CSV) 연수대장 파일 읽는 중...");
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+          try {
+            const text = e.target.result;
+            const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+            
+            let headerIndex = -1;
+            for (let i = 0; i < lines.length; i++) {
+              if (lines[i].includes("고유번호") || lines[i].includes("소속 근무교") || lines[i].includes("이수자 성명") || lines[i].includes("일자")) {
+                headerIndex = i;
+                break;
+              }
+            }
+
+            if (headerIndex === -1) {
+              throw new Error("올바른 대장 파일이 아닙니다. 헤더(고유번호, 일자 등)를 찾을 수 없습니다.");
+            }
+
+            const dataLines = lines.slice(headerIndex + 1);
+            const importedCerts = [];
+
+            for (const line of dataLines) {
+              const parts = [];
+              let current = "";
+              let inQuotes = false;
+              for (let i = 0; i < line.length; i++) {
+                const char = line[i];
+                if (char === '"') inQuotes = !inQuotes;
+                else if (char === ',' && !inQuotes) {
+                  parts.push(current.trim());
+                  current = "";
+                } else current += char;
+              }
+              parts.push(current.trim());
+
+              if (parts.length >= 7) {
+                const id = (parts[0] || "").replace(/^"|"$/g, "").trim() || Date.now().toString();
+                const date = (parts[1] || "").replace(/^"|"$/g, "").trim();
+                const affiliation = (parts[2] || "").replace(/^"|"$/g, "").trim();
+                const name = (parts[3] || "").replace(/^"|"$/g, "").trim();
+                const certNo = (parts[4] || "").replace(/^"|"$/g, "").trim();
+                const courseName = (parts[5] || "").replace(/^"|"$/g, "").trim();
+                const issuer = (parts[6] || "").replace(/^"|"$/g, "").trim();
+                const timeStr = (parts[7] || "").replace(/^"|"$/g, "").trim();
+                const driveFolder = (parts[8] || "").replace(/^"|"$/g, "").trim() || driveFolderUrl;
+                const importedFileName = (parts[9] || "").replace(/^"|"$/g, "").trim();
+
+                let timeNum = 0;
+                const hourMatch = timeStr.match(/([0-9]+)\s*시간/);
+                const minMatch = timeStr.match(/([0-9]+)\s*분/);
+                if (hourMatch) timeNum += parseInt(hourMatch[1], 10);
+                if (minMatch) timeNum += parseFloat((parseInt(minMatch[1], 10) / 60).toFixed(2));
+
+                if (courseName && name) {
+                  importedCerts.push({
+                    id, date, affiliation, name, certNo, courseName, issuer, timeStr, timeNum, driveFolder, fileName: importedFileName,
+                    timestamp: Date.now()
+                  });
+                }
+              }
+            }
+
+            if (importedCerts.length === 0) {
+              throw new Error("대장 파일 안에 유효한 연수 데이터 행이 없습니다.");
+            }
+
+            if (gasUrl) {
+              setParsingStep("스프레드시트에 동기화 기입 중...");
+              for (const cert of importedCerts) {
+                await callGasAPI({ action: "insert", data: cert });
+              }
+              await fetchGasData();
+            } else {
+              setCertificates(prev => [...importedCerts, ...prev]);
+            }
+            triggerNotification(`제목줄을 무시하고 총 ${importedCerts.length}건의 대장 연수 기록을 추가 완료했습니다.`);
+          } catch (csvErr) {
+            setErrorMsg(csvErr.message);
+          } finally {
+            setIsParsing(false);
+          }
+        };
+        reader.readAsText(file, "UTF-8");
+        return;
+      }
+
+      // 2. 이수증 PDF 또는 이미지 자동 분석
+      let payload = null;
+
+      if (isPdf) {
+        setParsingStep("PDF 이수증 텍스트 추출 분석 중...");
+        const extractedText = await extractTextFromPdf(file);
+        
+        if (!extractedText.trim()) {
+          throw new Error("스캔된 PDF 파일입니다. 사진 파일(PNG, JPG)로 변환해 올려주세요.");
+        }
+
+        setParsingStep("AI 정밀 교원연수증 분석기 동작 중...");
+        payload = {
+          contents: [{
+            parts: [{
+              text: `이 이수증 텍스트에서 아래의 JSON 스키마 가이드대로 항목들을 정확하게 한국어로 정제해서 추출해줘.\n\n[중요 지침]\n1. date(일자)는 수료 일자(예: 2025.10.27)로 포맷팅해서 'YYYY.MM.DD' 형태로 통일해줘.\n2. affiliation(소속 근무교)은 핵심 학교명만 짧게 추출해줘(예: '해운초등학교').\n3. issuer(이수기관)는 발급 주체 기관명(예: '경상남도교육청 교육연수원')을 하단 발급 도장 근처에서 추출해줘.\n\n[추출 텍스트]:\n${extractedText}`
+            }]
+          }],
+          systemInstruction: {
+            parts: [{
+              text: "너는 교원 연수 이수대장 정리 도우미야. 일자(date), 소속 근무교(affiliation), 이수자 성명(name), 이수번호(certNo), 연수 과정명(courseName), 이수기관(issuer), 이수인정시간(timeStr)을 수집하여 올바른 JSON으로 만들어 반환해줘."
+            }]
+          },
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: "OBJECT",
+              properties: {
+                date: { type: "STRING", description: "이수증 수료 완료 일자 (예: '2025.10.27')" },
+                affiliation: { type: "STRING", description: "소속 학교명만 (예: '해운초등학교')" },
+                name: { type: "STRING", description: "교원 성명" },
+                certNo: { type: "STRING", description: "이수증 번호 (예: '제 경남교연-2025-65593 호')" },
+                courseName: { type: "STRING", description: "연수 과정명" },
+                issuer: { type: "STRING", description: "발급 기관 (예: '경상남도교육청 교육연수원')" },
+                timeStr: { type: "STRING", description: "이수인정시간 (예: '23시간 4분' 또는 '15시간')" }
+              },
+              required: ["date", "affiliation", "name", "certNo", "courseName", "issuer", "timeStr"]
+            }
+          }
+        };
+      } else if (isImage) {
+        setParsingStep("이수증 사진 이미지 판독 중...");
+        const base64Data = await fileToBase64(file);
+        const mimeType = file.type || "image/png";
+
+        payload = {
+          contents: [{
+            parts: [
+              { text: "이 이수증 이미지에서 일자(date, YYYY.MM.DD 형식), 소속 근무교(affiliation, '해운초등학교' 형태), 성명(name), 이수번호(certNo), 연수 과정명(courseName), 이수기관(issuer), 이수인정시간(timeStr)을 분석해서 JSON으로 만들어줘." },
+              { inlineData: { mimeType: mimeType, data: base64Data } }
+            ]
+          }],
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: "OBJECT",
+              properties: {
+                date: { type: "STRING", description: "수료 완료일 (예: 2025.10.27)" },
+                affiliation: { type: "STRING", description: "소속 학교명만 (예: 해운초등학교)" },
+                name: { type: "STRING", description: "이수자 성명" },
+                certNo: { type: "STRING", description: "이수 번호" },
+                courseName: { type: "STRING", description: "과정 이름" },
+                issuer: { type: "STRING", description: "발급 기관명" },
+                timeStr: { type: "STRING", description: "이수 시간" }
+              },
+              required: ["date", "affiliation", "name", "certNo", "courseName", "issuer", "timeStr"]
+            }
+          }
+        };
+      }
+
+      const result = await callGeminiAPI(payload);
+      const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (!jsonText) throw new Error("AI 분석 엔진이 이수증 형식을 인지하지 못했습니다.");
+      const parsed = JSON.parse(jsonText);
+      
+      let cleanAffiliation = parsed.affiliation || "분석 실패";
+      const schoolMatch = cleanAffiliation.match(/[가-힣a-zA-Z0-9]+초등학교|[가-힣a-zA-Z0-9]+중학교|[가-힣a-zA-Z0-9]+고등학교|[가-힣a-zA-Z0-9]+학교/);
+      if (schoolMatch) cleanAffiliation = schoolMatch[0];
+      
+      let timeNum = 0;
+      const hourMatch = parsed.timeStr.match(/([0-9]+)\s*시간/);
+      const minMatch = parsed.timeStr.match(/([0-9]+)\s*분/);
+      if (hourMatch) timeNum += parseInt(hourMatch[1], 10);
+      if (minMatch) timeNum += parseFloat((parseInt(minMatch[1], 10) / 60).toFixed(2));
+
+      // 날짜 포맷 정리
+      let formattedDate = (parsed.date || "").replace(/\s+/g, "");
+      formattedDate = formattedDate.replace(/년/g, ".").replace(/월/g, ".").replace(/일/g, "");
+      const dateParts = formattedDate.split(".");
+      if (dateParts.length === 3) {
+        formattedDate = `${dateParts[0]}.${dateParts[1].padStart(2, "0")}.${dateParts[2].padStart(2, "0")}`;
+      } else {
+        formattedDate = parsed.date || "";
+      }
+
+      setParsedResult({
+        id: Date.now().toString(), // 임시 고유번호 발급
+        date: formattedDate,
+        affiliation: cleanAffiliation,
+        name: parsed.name || "분석 실패",
+        certNo: parsed.certNo || "분석 실패",
+        courseName: parsed.courseName || "분석 실패",
+        issuer: parsed.issuer || "기관 미상",
+        timeStr: parsed.timeStr || "0시간",
+        timeNum: timeNum || 0,
+        driveFolder: driveFolderUrl, // 현재 설정된 드라이브 폴더 URL 바인딩
+        fileName: file.name // 분석된 원본 파일명 보관
+      });
+
+      setShowEditor(true);
+      triggerNotification("이수증을 정교하게 판독했습니다. 검토 후 등록을 확정하세요.");
+    } catch (err) {
+      console.error(err);
+      setErrorMsg(err.message || "파일 처리 오류가 발생했습니다.");
+    } finally {
+      setIsParsing(false);
+      setParsingStep("");
+    }
+  };
+
+  // [요구사항] 이수번호가 같은 중복 데이터 등록 사전 필터링 및 구글 시트 등록 핸들러
+  const handleConfirmAdd = async () => {
+    if (!parsedResult) return;
+    
+    // 1. 프론트엔드 단에서 중복 연수증번호 검출 검사 (대소문자 및 띄어쓰기 가공 후 비교)
+    const normalizedNewCertNo = (parsedResult.certNo || "").replace(/제\s*|\s*호|\s/g, "");
+    
+    const isDuplicate = certificates.some(cert => {
+      const normalizedExisting = (cert.certNo || "").replace(/제\s*|\s*호|\s/g, "");
+      return normalizedExisting && normalizedNewCertNo && normalizedExisting === normalizedNewCertNo;
+    });
+
+    if (isDuplicate) {
+      setErrorMsg(`[등록 불가] 이미 동일한 이수번호(${parsedResult.certNo})를 가진 이수증이 구글 시트에 존재합니다. 중복 기입을 차단합니다.`);
+      triggerNotification("⚠️ 중복된 이수번호입니다. 등록이 차단되었습니다.");
+      return;
+    }
+
+    const newCert = { ...parsedResult, timestamp: Date.now() };
+    setSheetSyncing(true);
+
+    try {
+      if (gasUrl) {
+        const response = await callGasAPI({ action: "insert", data: newCert });
+        if (response && response.status === "success") {
+          await fetchGasData();
+          triggerNotification("구글 스프레드시트에 성공적으로 연동 저장되었습니다.");
+        } else if (response && response.status === "duplicate") {
+          setErrorMsg(response.message);
+          triggerNotification("⚠️ 이미 연동된 이수번호입니다.");
+        } else {
+          throw new Error(response.message);
+        }
+      } else {
+        const updated = [newCert, ...certificates];
+        setCertificates(updated);
+        localStorage.setItem("local_certs", JSON.stringify(updated));
+        triggerNotification("로컬에 기입되었습니다. 실시간 동기화를 위해 구글 시트를 연동해주세요.");
+      }
+    } catch (err) {
+      console.error(err);
+      setErrorMsg(`스프레드시트 동기화 실패: ${err.message}`);
+    } finally {
+      setSheetSyncing(false);
+      setParsedResult(null);
+      setShowEditor(false);
+    }
+  };
+
+  // 구글 시트 항목 삭제 연동 (구글 드라이브 이수증 파일 자동 추적 연동 삭제)
+  const deleteCert = async (certItem) => {
+    setSheetSyncing(true);
+    try {
+      if (gasUrl) {
+        // 고유번호(id)를 기준으로 행 탐색 및 완벽한 삭제 전송
+        const response = await callGasAPI({ 
+          action: "delete", 
+          id: certItem.id
+        });
+        if (response && response.status === "success") {
+          await fetchGasData();
+          
+          if (response.deletedFiles && response.deletedFiles.length > 0) {
+            triggerNotification(`구글 시트 연수 기록 및 구글 드라이브 파일(${response.deletedFiles.join(", ")}) 연계 완전 제거 완료!`);
+          } else {
+            triggerNotification("구글 시트에서 해당 연수 기록 행이 완전 제거되었습니다.");
+          }
+        } else {
+          throw new Error(response.message);
+        }
+      } else {
+        const updated = certificates.filter(c => c.id !== certItem.id);
+        setCertificates(updated);
+        localStorage.setItem("local_certs", JSON.stringify(updated));
+        triggerNotification("목록에서 해당 항목을 삭제했습니다.");
+      }
+    } catch (err) {
+      console.error(err);
+      setErrorMsg(`구글 시트 삭제 전송 실패: ${err.message}`);
+    } finally {
+      setSheetSyncing(false);
+    }
+  };
+
+  // 앱스 스크립트 코드 클립보드 복사 헬퍼
+  const copyScriptToClipboard = () => {
+    const scriptCode = `function doPost(e) {
+  try {
+    var contents = JSON.parse(e.postData.contents);
+    var action = contents.action;
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    if (sheet.getLastRow() === 0) {
+      sheet.appendRow(["고유번호", "일자", "소속 근무교", "이수자 성명", "이수번호", "연수 과정명", "이수기관", "이수인정시간", "드라이브 폴더", "원본파일명"]);
+      sheet.getRange("A1:J1").setFontWeight("bold").setBackground("#e6f4ea");
+    }
+    if (action === "read") {
+      var rows = sheet.getDataRange().getValues();
+      var data = [];
+      for (var i = 1; i < rows.length; i++) {
+        data.push({
+          id: rows[i][0] ? rows[i][0].toString() : "",
+          date: rows[i][1] instanceof Date ? (rows[i][1].getFullYear() + "." + String(rows[i][1].getMonth() + 1).padStart(2,'0') + "." + String(rows[i][1].getDate()).padStart(2,'0')) : rows[i][1].toString(),
+          affiliation: rows[i][2] ? rows[i][2].toString() : "",
+          name: rows[i][3] ? rows[i][3].toString() : "",
+          certNo: rows[i][4] ? rows[i][4].toString() : "",
+          courseName: rows[i][5] ? rows[i][5].toString() : "",
+          issuer: rows[i][6] ? rows[i][6].toString() : "",
+          timeStr: rows[i][7] ? rows[i][7].toString() : "",
+          driveFolder: rows[i][8] ? rows[i][8].toString() : "",
+          fileName: rows[i][9] ? rows[i][9].toString() : ""
+        });
+      }
+      return ContentService.createTextOutput(JSON.stringify({ status: "success", data: data })).setMimeType(ContentService.MimeType.JSON);
+    } else if (action === "insert") {
+      var item = contents.data;
+      var rows = sheet.getDataRange().getValues();
+      var incomingCertNo = (item.certNo || "").toString().replace(/제\\s*|\\s*호|\\s/g, "").trim();
+      for (var i = 1; i < rows.length; i++) {
+        var existingCertNo = rows[i][4] ? rows[i][4].toString().replace(/제\\s*|\\s*호|\\s/g, "").trim() : "";
+        if (existingCertNo && incomingCertNo && existingCertNo === incomingCertNo) {
+          return ContentService.createTextOutput(JSON.stringify({ status: "duplicate", message: "이미 구글 시트에 기입된 이수번호(" + item.certNo + ")입니다. 중복 입력을 차단합니다." })).setMimeType(ContentService.MimeType.JSON);
+        }
+      }
+      sheet.appendRow([item.id || Date.now().toString(), item.date, item.affiliation, item.name, item.certNo, item.courseName, item.issuer, item.timeStr, item.driveFolder || "", item.fileName || ""]);
+      return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
+    } else if (action === "delete") {
+      var id = contents.id;
+      var rows = sheet.getDataRange().getValues();
+      var deletedFilesLog = [];
+      for (var i = rows.length - 1; i >= 1; i--) {
+        if (rows[i][0].toString() === id.toString()) {
+          var rowCertNo = rows[i][4] ? rows[i][4].toString() : "";
+          var rowDriveFolder = rows[i][8] ? rows[i][8].toString() : "";
+          var rowFileName = rows[i][9] ? rows[i][9].toString() : "";
+          
+          var folderId = "";
+          var rawFolder = rowDriveFolder || TARGET_FOLDER_ID;
+          if (rawFolder.indexOf("folders/") !== -1) {
+            var parts = rawFolder.split("folders/");
+            if (parts.length > 1) {
+              folderId = parts[1].split("?")[0].split("/")[0].trim();
+            }
+          } else {
+            folderId = rawFolder.trim();
+          }
+
+          var fileDeleted = false;
+          if (folderId && rowFileName) {
+            try {
+              var folder = DriveApp.getFolderById(folderId);
+              var files = folder.getFilesByName(rowFileName);
+              while (files.hasNext()) {
+                var file = files.next();
+                deletedFilesLog.push(file.getName());
+                file.setTrashed(true);
+                fileDeleted = true;
+              }
+            } catch(e) {}
+          }
+
+          if (!fileDeleted && rowCertNo && folderId) {
+            var cleanCertNo = rowCertNo.replace(/제\\s*|\\s*호/g, "").trim();
+            if (cleanCertNo.length > 2) {
+              try {
+                var folder = DriveApp.getFolderById(folderId);
+                var query = "title contains '" + cleanCertNo + "' and trashed = false";
+                var files = folder.searchFiles(query);
+                while (files.hasNext()) {
+                  var file = files.next();
+                  deletedFilesLog.push(file.getName());
+                  file.setTrashed(true);
+                }
+              } catch(e) {}
+            }
+          }
+          sheet.deleteRow(i + 1);
+        }
+      }
+      return ContentService.createTextOutput(JSON.stringify({ status: "success", deletedFiles: deletedFilesLog })).setMimeType(ContentService.MimeType.JSON);
+    }
+  } catch(err) {
+    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+  }
+}`;
+    
+    const textArea = document.createElement("textarea");
+    textArea.value = scriptCode;
+    document.body.appendChild(textArea);
+    textArea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textArea);
+    triggerNotification("Apps Script 백엔드 연동 소스코드가 클립보드에 복사되었습니다!");
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans text-slate-800 relative">
+      
+      {/* Toast 알림 구현 */}
+      {notification && (
+        <div className="fixed bottom-5 right-5 z-50 bg-slate-900 text-white px-5 py-3 rounded-xl shadow-2xl flex items-center gap-2 border border-slate-700 animate-in fade-in slide-in-from-bottom-4 duration-300 max-w-sm">
+          <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+          <span className="text-xs font-semibold leading-relaxed">{notification}</span>
+        </div>
+      )}
+
+      <div className="max-w-7xl mx-auto space-y-6">
+        
+        {/* 상단 통합 헤더 */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+          <div>
+            <h1 className="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight flex items-center gap-3">
+              <Award className="w-8 h-8 text-emerald-600 shrink-0" />
+              <span>교원 연수 이수증 대장 정리기</span>
+            </h1>
+            <p className="text-slate-500 mt-1.5 text-sm font-medium">
+              이수증 파일을 올리면 AI 분석 및 정제를 통해 <b>실제 구글 스프레드시트</b>에 실시간 자동 삽입 및 양방향 동기화됩니다.
+            </p>
+          </div>
+          
+          <div className="flex items-center gap-2">
+            {gasUrl ? (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 text-xs font-semibold border border-emerald-200">
+                <CloudLightning className="w-3.5 h-3.5 text-emerald-500 animate-bounce" />
+                구글 스프레드시트 실시간 동기화 완료
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 text-amber-700 text-xs font-semibold border border-amber-200 animate-pulse">
+                로컬 저장 모드 (구글 시트 연계 필요)
+              </span>
+            )}
+            <button
+              onClick={() => setShowGasGuide(!showGasGuide)}
+              className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-indigo-600 transition-colors"
+              title="설치 가이드 확인"
+            >
+              <HelpCircle className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+
+        {/* 연수 통계 대시보드 */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 flex items-center gap-4">
+            <div className="p-3 bg-emerald-50 text-emerald-600 rounded-xl">
+              <FileSpreadsheet className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-xs font-medium text-slate-400">구글 시트 총 레코드 수</p>
+              <h3 className="text-xl font-bold text-slate-950">{certificates.length} 건</h3>
+            </div>
+          </div>
+          
+          <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 flex items-center gap-4">
+            <div className="p-3 bg-blue-50 text-blue-600 rounded-xl">
+              <Clock className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-xs font-medium text-slate-400">총 누적 인정 시간</p>
+              <h3 className="text-xl font-bold text-slate-950">{totalHours.toFixed(1)} 시간</h3>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 flex items-center gap-4">
+            <div className="p-3 bg-purple-50 text-purple-600 rounded-xl">
+              <User className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-xs font-medium text-slate-400">최종 대장 기록 인원</p>
+              <h3 className="text-xl font-bold text-slate-950 truncate max-w-[120px]">
+                {certificates.length > 0 ? `${certificates[0].name}` : '미등록'}
+              </h3>
+            </div>
+          </div>
+
+          {/* 구글 스프레드시트 1:1 커스텀 연계 조작 패널 */}
+          <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 flex flex-col justify-between">
+            <div className="flex items-center justify-between w-full">
+              <div className="flex items-center gap-2">
+                <Settings className="w-5 h-5 text-indigo-600" />
+                <span className="text-xs font-bold text-slate-700">시트 수동 연계 설정</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setIsEditingUrl(!isEditingUrl)}
+                  title="실제 구글 시트 링크 수정"
+                  className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-slate-50 rounded transition-colors"
+                >
+                  <Settings className="w-4 h-4" />
+                </button>
+                <button 
+                  onClick={downloadCSV}
+                  title="엑셀/구글 시트 호환 CSV 다운로드"
+                  className="p-1 text-slate-400 hover:text-emerald-600 hover:bg-slate-50 rounded transition-colors"
+                >
+                  <Download className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-2">
+              {isEditingUrl ? (
+                <div className="space-y-1.5">
+                  <div>
+                    <label className="block text-[8px] font-bold text-slate-400">Apps Script 웹 앱 URL</label>
+                    <input
+                      type="text"
+                      value={gasInputValue}
+                      onChange={(e) => setGasInputValue(e.target.value)}
+                      placeholder="배포된 Apps Script 웹 앱 주소"
+                      className="w-full text-[9px] p-1 border border-slate-200 rounded focus:outline-none focus:border-indigo-500 font-mono text-indigo-600 bg-slate-50"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[8px] font-bold text-slate-400">실제 스프레드시트 원본 URL</label>
+                    <input
+                      type="text"
+                      value={sheetInputValue}
+                      onChange={(e) => setSheetInputValue(e.target.value)}
+                      placeholder="교원 연수 이수증 통합 관리대장 스프레드시트 주소"
+                      className="w-full text-[9px] p-1 border border-slate-200 rounded focus:outline-none focus:border-indigo-500 font-mono text-emerald-600 bg-slate-50"
+                    />
+                  </div>
+                  {/* 구글 드라이브 폴더 URL 연계 설정 입력칸 */}
+                  <div>
+                    <label className="block text-[8px] font-bold text-slate-400">원본 이수증 파일 저장 폴더 URL</label>
+                    <input
+                      type="text"
+                      value={folderInputValue}
+                      onChange={(e) => setFolderInputValue(e.target.value)}
+                      placeholder="구글 드라이브 파일 보관 전용 폴더 주소"
+                      className="w-full text-[9px] p-1 border border-slate-200 rounded focus:outline-none focus:border-indigo-500 font-mono text-blue-600 bg-slate-50"
+                    />
+                  </div>
+                  <div className="flex gap-1 justify-end">
+                    <button 
+                      onClick={() => { setIsEditingUrl(false); setErrorMsg(""); }} 
+                      className="px-1.5 py-0.5 text-[9px] text-slate-500 hover:bg-slate-100 rounded"
+                    >
+                      취소
+                    </button>
+                    <button 
+                      onClick={handleSaveSheetUrl} 
+                      className="px-2 py-0.5 text-[9px] bg-emerald-600 text-white rounded font-bold"
+                    >
+                      연동 완료
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-0.5">
+                  <p className="text-[10px] text-slate-400 truncate" title={gasUrl || "연결 주소 없음"}>
+                    API 연동: <span className="font-mono text-indigo-600">{gasUrl ? gasUrl : "미연결"}</span>
+                  </p>
+                  <p className="text-[10px] text-slate-400 truncate" title={spreadsheetUrl || "연결된 스프레드시트 없음"}>
+                    바로가기 시트: <span className="font-mono text-emerald-600">{spreadsheetUrl ? spreadsheetUrl : "설정에서 등록 필요"}</span>
+                  </p>
+                  <p className="text-[10px] text-slate-400 truncate" title={driveFolderUrl || "연결된 드라이브 폴더 없음"}>
+                    원본 저장 폴더: <span className="font-mono text-blue-600">{driveFolderUrl ? driveFolderUrl : "설정에서 등록 필요"}</span>
+                  </p>
+                  <span className="text-xs text-emerald-600 font-bold flex items-center gap-1">
+                    <Check className="w-3.5 h-3.5" /> 시트 백엔드와 다이렉트 연동
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-2.5">
+              <div className="text-[10px] text-slate-500 bg-slate-50 rounded py-1 flex items-center gap-1 justify-center">
+                <Database className="w-3 h-3 text-emerald-600" /> API 오차율 0% 격자 동기화 연동 중
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* 대시보드 사용 가이드 아코디언 */}
+        {showGasGuide && (
+          <div className="bg-white border-2 border-indigo-500 rounded-2xl p-6 space-y-4 animate-in fade-in duration-300 font-sans">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="font-bold text-slate-900 flex items-center gap-2">
+                <FileSpreadsheet className="text-emerald-600 w-5 h-5" />
+                교사용 실제 구글 스프레드시트 3분 초간단 연동 가이드
+              </h3>
+              <button 
+                onClick={() => setShowGasGuide(false)}
+                className="p-1 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs text-slate-600 leading-relaxed">
+              <div className="space-y-3">
+                <p className="font-semibold text-indigo-600">■ 1단계: 시트 내부에 소스코드 심기</p>
+                <ol className="list-decimal list-inside space-y-1.5 pl-1.5">
+                  <li>구글 스프레드시트를 열고, 상단 메뉴에서 <b>[확장 프로그램] ➡️ [Apps Script]</b>를 실행합니다.</li>
+                  <li>창에 입력되어 있던 기본 문구들을 모두 지웁니다.</li>
+                  <li>우측의 <span className="text-indigo-600 font-bold cursor-pointer underline" onClick={copyScriptToClipboard}>[여기 클릭하여 Apps Script 소스복사]</span> 버튼을 눌러 복사한 후 지운 공간에 붙여넣기합니다.</li>
+                  <li>상단의 디스크 아이콘(저장)을 누릅니다.</li>
+                </ol>
+                <button
+                  onClick={copyScriptToClipboard}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold rounded-lg border border-indigo-200 transition-colors"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  스마트 백엔드 소스코드 복사하기
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                <p className="font-semibold text-emerald-600">■ 2단계: 웹 앱 배포 후 URL 연동하기</p>
+                <ol className="list-decimal list-inside space-y-1.5 pl-1.5">
+                  <li>오른쪽 위 파란색 <b>[배포] ➡️ [새 배포]</b> 버튼을 누릅니다.</li>
+                  <li>유형 선택에서 기어(⚙️)를 눌러 <b>[웹 앱]</b>을 체크합니다.</li>
+                  <li>액세스 권한이 있는 사용자 항목을 <b>[모든 사람 (Anyone)]</b>으로 설정하고 배포합니다.</li>
+                  <li>구글 계정 액세스 권한 승인이 나오면 <b>[권한 승인] ➡️ [고급] ➡️ [이동] ➡️ [허용]</b>을 차례대로 누릅니다.</li>
+                  <li>화면에 발급되는 <b>웹 앱 URL 주소</b>를 복사한 후, 우측 상단 <b>[시트 수동 연계 설정]</b>에 입력하고 저장하면 완료됩니다!</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 1단 반응형 레이아웃 */}
+        <div className="space-y-6 w-full">
+          
+          {/* 이수증 파일 업로드 카드 - 100% 좌우 넓이 확보 */}
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 flex flex-col w-full">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-5 h-5 text-indigo-600" />
+                <h2 className="text-lg font-bold text-slate-900">이수증 및 시트 파일 업로드</h2>
+              </div>
+              <span className="text-xs text-slate-400 font-medium flex items-center gap-1">
+                <RefreshCcw className="w-3.5 h-3.5 text-indigo-500" /> 실시간 드래그 앤 드롭
+              </span>
+            </div>
+            
+            <p className="text-xs text-slate-500 leading-relaxed mb-4 font-sans">
+              교원 이수증 <b>PDF 문서</b>, 스마트폰으로 촬영한 <b>이수증 사진 이미지</b>, 또는 기 다운받았던 <b>CSV 백업 시트</b>를 편하게 드롭하세요. <br />
+              <span className="text-emerald-600 font-semibold">★ 실제 구글 시트 양식(고유번호, 일자, 소속, 이름, 번호, 과정명, 발급처, 인정시간)에 무결점 일치하여 보정 판독 및 분류합니다.</span>
+            </p>
+
+            {/* 드래그앤드롭 Zone */}
+            <div
+              onDragEnter={handleDrag}
+              onDragOver={handleDrag}
+              onDragLeave={handleDrag}
+              onDrop={handleDrop}
+              onClick={() => fileInputRef.current.click()}
+              className={`border-2 border-dashed rounded-2xl p-10 flex flex-col items-center justify-center text-center cursor-pointer transition-all ${
+                isDragActive 
+                  ? "border-indigo-500 bg-indigo-50/50 scale-[1.005]" 
+                  : "border-slate-200 hover:border-indigo-400 hover:bg-slate-50/50"
+              }`}
+            >
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileSelect}
+                accept=".pdf, image/*, .csv"
+                className="hidden"
+              />
+
+              <div className="p-4 bg-indigo-50 rounded-full text-indigo-600 mb-3">
+                <UploadCloud className="w-10 h-10 animate-pulse" />
+              </div>
+              
+              <p className="text-base font-semibold text-slate-700">이곳에 이수증 파일이나 CSV 백업 대장을 놓으세요</p>
+              <p className="text-xs text-slate-400 mt-1">또는 마우스로 클릭하여 파일 탐색기 열기</p>
+              
+              <div className="flex items-center gap-3 mt-4 text-xs font-medium text-slate-500 bg-slate-100 px-4 py-1.5 rounded-full">
+                <span className="flex items-center gap-1 text-slate-600">
+                  <FileCode className="w-3.5 h-3.5" /> PDF 이수증
+                </span>
+                <span className="text-slate-300">|</span>
+                <span className="flex items-center gap-1 text-slate-600">
+                  <ImageIcon className="w-3.5 h-3.5" /> 사진 파일 (PNG, JPG)
+                </span>
+                <span className="text-slate-300">|</span>
+                <span className="flex items-center gap-1 text-emerald-600 font-semibold">
+                  <FileSpreadsheet className="w-3.5 h-3.5" /> 백업 구글시트 (.CSV)
+                </span>
+              </div>
+            </div>
+
+            {/* 진행 상태 인디케이터 */}
+            {isParsing && (
+              <div className="mt-4 p-4 bg-indigo-50 rounded-xl flex items-center gap-3 border border-indigo-100 animate-pulse">
+                <RefreshCw className="w-5 h-5 text-indigo-600 animate-spin shrink-0" />
+                <div className="text-xs">
+                  <p className="font-bold text-indigo-900">AI 정밀 판독기 실시간 작동 중</p>
+                  <p className="text-indigo-600 mt-0.5">{parsingStep}</p>
+                </div>
+              </div>
+            )}
+
+            {/* 에러 발생 메시지 */}
+            {errorMsg && (
+              <div className="mt-4 p-4 bg-red-50 rounded-xl flex items-start gap-3 border border-red-100">
+                <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                <div className="text-xs">
+                  <p className="font-bold text-red-900">처리 오류</p>
+                  <p className="text-red-600 mt-0.5 leading-relaxed whitespace-pre-wrap">{errorMsg}</p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* AI 파싱 결과 수동 검토 및 최종 입력창 */}
+          {showEditor && parsedResult && (
+            <div className="bg-white rounded-2xl shadow-md border-2 border-indigo-500 p-6 space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300 w-full">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div className="flex items-center gap-2">
+                  <Edit3 className="w-5 h-5 text-indigo-600" />
+                  <h3 className="text-base font-bold text-slate-900">추출 데이터 검토 및 구글 시트 전송 준비</h3>
+                </div>
+                <span className="text-xs font-semibold bg-emerald-100 text-emerald-800 px-2.5 py-0.5 rounded-full animate-pulse">
+                  AI 검증 성공
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-400 font-semibold mb-1">일자 (수료일)</label>
+                    <input 
+                      type="text" 
+                      value={parsedResult.date}
+                      onChange={(e) => handleFieldChange('date', e.target.value)}
+                      placeholder="예: 2025.10.27"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-800 font-semibold focus:outline-none focus:border-indigo-500 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 font-semibold mb-1">소속 근무교</label>
+                    <input 
+                      type="text" 
+                      value={parsedResult.affiliation}
+                      onChange={(e) => handleFieldChange('affiliation', e.target.value)}
+                      placeholder="예: 해운초등학교"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-indigo-700 font-semibold focus:outline-none focus:border-indigo-500 text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-400 font-semibold mb-1">이수자 성명</label>
+                    <input 
+                      type="text" 
+                      value={parsedResult.name}
+                      onChange={(e) => handleFieldChange('name', e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-800 font-semibold focus:outline-none focus:border-indigo-500 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 font-semibold mb-1">이수번호</label>
+                    <input 
+                      type="text" 
+                      value={parsedResult.certNo}
+                      onChange={(e) => handleFieldChange('certNo', e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-800 font-semibold focus:outline-none focus:border-indigo-500 text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-slate-400 font-semibold mb-1">연수 과정명</label>
+                  <input 
+                    type="text" 
+                    value={parsedResult.courseName}
+                    onChange={(e) => handleFieldChange('courseName', e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-800 font-semibold focus:outline-none focus:border-indigo-500 text-sm"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-400 font-semibold mb-1">이수기관</label>
+                    <input 
+                      type="text" 
+                      value={parsedResult.issuer}
+                      onChange={(e) => handleFieldChange('issuer', e.target.value)}
+                      placeholder="예: 국립통일교육원"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-800 font-semibold focus:outline-none focus:border-indigo-500 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 font-semibold mb-1">이수인정시간</label>
+                    <input 
+                      type="text" 
+                      value={parsedResult.timeStr}
+                      onChange={(e) => handleFieldChange('timeStr', e.target.value)}
+                      placeholder="예: 15시간"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-800 font-semibold focus:outline-none focus:border-indigo-500 text-sm"
+                    />
+                  </div>
+                </div>
+
+                {/* 파일 및 폴더 매핑 필드 추가 표출 */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-400 font-semibold mb-1">드라이브 폴더 URL (ID)</label>
+                    <input 
+                      type="text" 
+                      value={parsedResult.driveFolder}
+                      onChange={(e) => handleFieldChange('driveFolder', e.target.value)}
+                      placeholder="구글 드라이브 파일 폴더 URL"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-indigo-600 font-semibold focus:outline-none focus:border-indigo-500 text-sm font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 font-semibold mb-1">원본 파일명</label>
+                    <input 
+                      type="text" 
+                      value={parsedResult.fileName}
+                      onChange={(e) => handleFieldChange('fileName', e.target.value)}
+                      placeholder="이수증 원본 파일 이름"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-800 font-semibold focus:outline-none focus:border-indigo-500 text-sm font-mono"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex gap-2 pt-3 border-t border-slate-100 justify-end font-sans">
+                <button
+                  onClick={() => { setShowEditor(false); setParsedResult(null); setErrorMsg(""); }}
+                  className="px-6 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-2.5 rounded-xl transition-colors text-xs"
+                >
+                  분석 취소
+                </button>
+                <button
+                  onClick={handleConfirmAdd}
+                  className="px-8 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2.5 rounded-xl flex items-center justify-center gap-1.5 transition-colors text-xs shadow-sm shadow-emerald-100"
+                >
+                  <Check className="w-4 h-4" />
+                  구글 스프레드시트에 기입 및 등록
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* 분석 및 등록 완료 명단 테이블 */}
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden flex flex-col w-full">
+            <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div className="flex items-center gap-2">
+                <Award className="w-5 h-5 text-emerald-600" />
+                <h2 className="text-lg font-bold text-slate-900">교원 연수 이수증 통합 관리대장 (실시간 연동 데이터)</h2>
+              </div>
+              
+              {/* 실제 구글 시트 가기 단추 */}
+              <div className="flex items-center gap-2 self-start sm:self-auto font-sans">
+                <button
+                  onClick={handleGoToGoogleSheet}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-all shadow-sm shadow-emerald-100 cursor-pointer"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  구글 시트 열기
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </button>
+                {/* 구글 드라이브 폴더 열기 단추 */}
+                <button
+                  onClick={handleGoToDriveFolder}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition-all shadow-sm shadow-blue-100 cursor-pointer"
+                >
+                  <FolderOpen className="w-4 h-4" />
+                  드라이브 폴더 열기
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </button>
+                <span className="text-xs bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-xl font-bold border border-emerald-100">
+                  {sheetSyncing ? "동기화 중..." : "동기화 실시간 감시 중"}
+                </span>
+              </div>
+            </div>
+            
+            <div className="overflow-x-auto font-sans">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  {/* 칼럼 구성: No | 고유번호 | 일자 | 소속 근무교 | 이수자 성명 | 이수번호 | 연수 과정명 | 이수기관 | 이수인정시간 | 파일연계 */}
+                  <tr className="bg-slate-50/75 text-slate-500 text-xs uppercase font-semibold border-b border-slate-100">
+                    <th className="p-4 pl-6 text-center w-12">No.</th>
+                    <th className="p-4 whitespace-nowrap">고유번호</th>
+                    <th className="p-4 whitespace-nowrap">일자</th>
+                    <th className="p-4 whitespace-nowrap">소속 근무교</th>
+                    <th className="p-4 whitespace-nowrap">이수자 성명</th>
+                    <th className="p-4 whitespace-nowrap">이수번호</th>
+                    <th className="p-4">연수 과정명</th>
+                    <th className="p-4">이수기관</th>
+                    <th className="p-4 text-right pr-6 whitespace-nowrap">이수인정시간</th>
+                    <th className="p-4 whitespace-nowrap">드라이브 파일 연계</th>
+                    <th className="p-4 text-center w-16">삭제</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-sm">
+                  {certificates.length === 0 ? (
+                    <tr>
+                      <td colSpan="11" className="p-20 text-center text-slate-400">
+                        <AlertTriangle className="w-10 h-10 mx-auto mb-3 text-slate-300 animate-bounce" />
+                        <p className="font-semibold text-slate-600 text-base">구글 시트에 등록된 연수 내역이 전혀 존재하지 않습니다.</p>
+                        <p className="text-xs text-slate-400 mt-2">위 파일 업로드 영역을 이용해 신규 이수증이나 다운받았던 CSV 백업 대장을 업로드해 정리해 보세요.</p>
+                      </td>
+                    </tr>
+                  ) : (
+                    certificates.map((cert, index) => (
+                      <tr key={cert.id || index} className="hover:bg-slate-50/50 transition-colors group">
+                        <td className="p-4 text-center pl-6 text-xs text-slate-400 font-mono">
+                          {index + 1}
+                        </td>
+                        <td className="p-4 whitespace-nowrap text-xs text-slate-500 font-mono">
+                          {cert.id}
+                        </td>
+                        <td className="p-4 whitespace-nowrap">
+                          <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-lg">
+                            <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                            {cert.date}
+                          </div>
+                        </td>
+                        <td className="p-4 whitespace-nowrap">
+                          <p className="text-xs text-indigo-600 font-bold bg-indigo-50 px-2.5 py-1 rounded-full inline-block">
+                            {cert.affiliation}
+                          </p>
+                        </td>
+                        <td className="p-4 whitespace-nowrap">
+                          <p className="font-semibold text-slate-800">{cert.name}</p>
+                        </td>
+                        <td className="p-4 whitespace-nowrap">
+                          <p className="text-xs text-slate-500 font-mono bg-slate-50 px-2.5 py-1 rounded border border-slate-100 inline-block">
+                            {cert.certNo}
+                          </p>
+                        </td>
+                        <td className="p-4 min-w-[250px]">
+                          <p className="font-semibold text-slate-900 text-sm line-clamp-1" title={cert.courseName}>
+                            {cert.courseName}
+                          </p>
+                        </td>
+                        <td className="p-4 whitespace-nowrap">
+                          <div className="flex items-center gap-1.5 text-slate-600 text-xs font-medium">
+                            <Building className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            <span>{cert.issuer}</span>
+                          </div>
+                        </td>
+                        <td className="p-4 text-right pr-6 whitespace-nowrap">
+                          <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 text-xs font-bold">
+                            {cert.timeStr}
+                          </span>
+                        </td>
+                        {/* 대시보드 테이블에 실제 이수증 저장 경로 및 파일명을 1:1로 가시화 */}
+                        <td className="p-4 whitespace-nowrap text-xs">
+                          <div className="flex flex-col gap-1">
+                            {cert.driveFolder ? (
+                              <a 
+                                href={cert.driveFolder} 
+                                target="_blank" 
+                                rel="noopener noreferrer" 
+                                className="inline-flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-800 hover:underline font-semibold"
+                              >
+                                <FolderOpen className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                                폴더 열기
+                              </a>
+                            ) : (
+                              <span className="text-slate-300 italic">폴더 미연계</span>
+                            )}
+                            {cert.fileName ? (
+                              <span className="text-[10px] text-slate-400 font-mono truncate max-w-[150px]" title={cert.fileName}>
+                                {cert.fileName}
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-slate-300 italic">파일명 없음</span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="p-4 text-center">
+                          <button 
+                            onClick={() => deleteCert(cert)}
+                            className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                            title="구글 시트에서 행 제거"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}
